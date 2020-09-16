@@ -1,116 +1,61 @@
-from __future__ import division
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Variable
-import numpy as np
 
-from utils import parse_cfg
+from utils import parse_cfg, predict_transform
+from module import create_modules
 
-
-yolov3_config = './config/yolov3.cfg'
-
-def create_modules(cfgfile):
-    blocks = parse_cfg(cfgfile)
-    net_info = blocks[0]
-    module_list = nn.ModuleList()
-    prev_filters = 3
-    output_filters = []
-    for idx, x in enumerate(blocks[1:]):
-        module = nn.Sequential()
-        
-        # Convolutional layer
-        if x['type'] == 'convolutional':
-            activation = x['activation']
-            try:
-                batch_normalize = int(x['bacth_normalize'])
-                bias = False
-            except:
-                batch_normalize = 0
-                bias = True
-            filters = int(x['filters'])
-            kernel_size = int(x['size'])
-            stride = int(x['stride'])
-            padding = int(x['pad'])
-            if padding:
-                pad = (kernel_size - 1) // 2
-            else:
-                pad = 0
-            
-            conv = nn.Conv2d(prev_filters, filters, kernel_size, 
-                             stride, pad, bias=bias)
-            module.add_module(f'conv_{idx}', conv)
-            
-            if batch_normalize:
-                bn = nn.BatchNorm2d(filters)
-                module.add_module(f'batch_norm_{idx}', bn)
-            
-            if activation == 'leaky':
-                active = nn.LeakyReLU(0.1, inplace=True)
-                module.add_module(f'leaky_{idx}', active)
-        
-        # Upsampling
-        elif x['type'] == 'upsample':
-            stride = int(x['stride'])
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
-            module.add_module(f'upsample_{idx}', upsample)
-        
-        # Route/shortcut
-        elif x['type'] == 'route':
-            x['layers'] = x['layers'].split(',')
-            
-            start = int(x['layers'][0])
-            
-            try:
-                end = int(x['layers'][1])
-            except:
-                end = 0
-            
-            if start > 0:
-                start = start - idx
-            if end > 0:
-                end = end - idx
-            
-            route = EmptyLayer()
-            module.add_module(f'route_{idx}', route)
-            
-            if end > 0:
-                filters = output_filters[idx + start] + \
-                    output_filters[idx + end]
-            else:
-                filters = output_filters[idx + start]
-        
-        elif x['type'] == 'shortcut':
-            shortcut = EmptyLayer()
-            module.add_module(f'shortcut_{idx}', shortcut)
-        
-        # YOLO
-        elif x['type'] == 'yolo':
-            mask = x['mask'].split(',')
-            mask = [int(x) for x in mask]
-            
-            anchors = x['anchors'].split(',')
-            anchors = [(anchors[i], anchors[i + 1]) 
-                       for i in range(0, len(anchors), 2)]
-            anchors = [anchors[i] for i in mask]
-            
-            detection = Detection(anchors)
-            module.add_module(f'detection_{idx}', detection)
-        
-        module_list.append(module)
-        prev_filters = filters
-        output_filters.append(filters)
+class Darknet(nn.Module):
     
-    return net_info, module_list
-
-class EmptyLayer(nn.Module):
-    def __init__(self):
-        super(EmptyLayer, self).__init__()
-
-class Detection(nn.Module):
-    def __init__(self, anchors):
-        super(Detection, self).__init__()
-        self.anchors = anchors
-# Test
-# print(create_modules(yolov3_config))
+    def __init__(self, cfgfile):
+        super(Darknet, self).__init__()
+        self.blocks = parse_cfg(cfgfile)
+        self.net_info, self.module_list = create_modules(self.blocks)
+    
+    def forward(self, x, CUDA):
+        modules = self.blocks[1:]
+        outputs = {}
+        
+        write = 0
+        for i, module in enumerate(modules):
+            m_type = (module['type'])
+            
+            if m_type == 'convolutional' or m_type == 'upsample':
+                x = self.module_list[i](x)
+                
+            elif m_type == 'route':
+                layers = module['layers']
+                layers = [int(layer) for layer in layers]
+                
+                if (layers[0]) > 0:
+                    layers[0] = layers[0] - i
+                if len(layers) == 1:
+                    x = outputs[i + (layers[0])]
+                else:
+                    if (layers[1]) > 0:
+                        layers[1] = layers[1] - i
+                    map1 = outputs[i + layers[0]]
+                    map2 = outputs[i + layers[1]]
+                    
+                    x = torch.cat((map1, map2), 1)
+                    
+            elif m_type == 'shortcut':
+                from_ = int(module['from'])
+                x = outputs[i - 1] + outputs[i + from_]
+            
+            elif m_type == 'yolo':
+                anchors = self.module_list[i][0].anchors
+                in_dim = int(self.net_info['height'])
+                num_classes = int(module['classes'])
+                
+                x = x.data
+                x = predict_transform(x, in_dim, anchors, num_classes, CUDA)
+                if not write:
+                    detections = x
+                    write = 1
+                else:
+                    detections = torch.cat((detections, x), 1)
+                    
+            outputs[i] = x
+        
+        return detections
+            
