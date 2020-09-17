@@ -95,7 +95,7 @@ class DetectionLayer(nn.Module):
         self.img_size = img_size
         self.grid_size = 0
     
-    def grid_offsets(grid_size, cuda=True):
+    def compute_grid_offsets(self, grid_size, cuda=True):
         self.grid_size = grid_size
         g = self.grid_size
         self.stride = self.img_size // self.grid_size
@@ -123,6 +123,59 @@ class DetectionLayer(nn.Module):
             .permute(0, 1, 3, 4, 2)
             .contiguous()
         )
+        
+        x = torch.sigmoid(prediction[..., 0])
+        y = torch.sigmoid(prediction[..., 1])
+        w = prediction[..., 2]
+        h = prediction[..., 3]
+        pred_conf = torch.sigmoid(prediction[..., 4])
+        pred_cls = torch.sigmoid(prediction[..., 5:])
+        
+        if grid_size != self.grid_size:
+            self.compute_grid_offsets(grid_size, x.is_cuda)
+        
+        pred_boxes = FloatTensor(prediction[..., :4].shape)
+        pred_boxes[..., 0] = x.data + self.grid_x
+        pred_boxes[..., 1] = y.data + self.grid_y
+        pred_boxes[..., 2] = torch.exp(w.data) * self.anchor_w
+        pred_boxes[..., 3] = torch.exp(h.data) * self.anchor_h
+        
+        output = torch.cat(
+            (
+            pred_boxes.view(num_samples, -1, 4) * self.stride,
+            pred_conf.view(num_samples, -1, 1),
+            pred_cls.view(num_samples, -1, self.num_classes),
+            ),
+            -1,
+        )
+        
+        return output
 
-# Test
-print(create_modules(parse_cfg(yolov3_config))[1])
+class Darknet(nn.Module):
+    
+    def __init__(self, config_path, img_size=416):
+        super(Darknet, self).__init__()
+        self.module_defs = parse_cfg(config_path)
+        self.net_info, self.module_list = create_modules(self.module_defs)
+        self.img_size = img_size
+    
+    def forward(self, x, targets=None):
+        img_dim = x.shape[2]
+        layer_outputs, yolo_outputs = [], []
+        for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
+            if module_def['type'] in ['convolutional', 'maxpool', 'upsample']:
+                x = module(x)
+            elif module_def['type'] == 'route':
+                x = torch.cat([layer_outputs[int(layer_i)] 
+                               for layer_i in module_def['layers'].split(',')], 1)
+            elif module_def['type'] == 'shortcut':
+                layer_i = int(module_def['from'])
+                x = layer_outputs[-1] + layer_outputs[layer_i]
+            elif module_def['type'] == 'yolo':
+                x = module[0](x, targets, img_dim)
+                yolo_outputs.append(x)
+            layer_outputs.append(x)
+        return yolo_outputs
+# Test modules
+# print(create_modules(parse_cfg(yolov3_config))[1])
+
