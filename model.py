@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from utils import parse_cfg
+from utils import *
 
 
 yolov3_config = './config/yolov3-tiny.cfg'
@@ -38,10 +38,12 @@ def create_modules(blocks):
             if x['activation'] == 'leaky':
                 active = nn.LeakyReLU(0.1, inplace=True)
                 module.add_module(f'leaky_{idx}', active)
-                
+        # Maxpool
         elif x['type'] == 'maxpool':
             kernel_size = int(x['size'])
             stride = int(x['stride'])
+            if kernel_size == 2 and stride == 1:
+                module.add_module(f'_debug_padding_{idx}', nn.ZeroPad2d((0, 1, 0, 1)))
             padding = (kernel_size - 1) // 2
             maxpool = nn.MaxPool2d(kernel_size, stride, padding)
             module.add_module(f'maxpool_{idx}', maxpool)
@@ -49,7 +51,7 @@ def create_modules(blocks):
         # Upsampling
         elif x['type'] == 'upsample':
             stride = int(x['stride'])
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
+            upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
             module.add_module(f'upsample_{idx}', upsample)
         
         # Route/shortcut
@@ -94,6 +96,7 @@ class DetectionLayer(nn.Module):
         self.num_classes = num_classes
         self.img_size = img_size
         self.grid_size = 0
+        self.ignore_thres = 0.5
     
     def compute_grid_offsets(self, grid_size, cuda=True):
         self.grid_size = grid_size
@@ -119,7 +122,7 @@ class DetectionLayer(nn.Module):
         
         prediction = (
             x.view(num_samples, self.num_anchors, self.num_classes + 5, 
-                   self.grid_size, self.grid_size)
+                   grid_size, grid_size)
             .permute(0, 1, 3, 4, 2)
             .contiguous()
         )
@@ -149,6 +152,17 @@ class DetectionLayer(nn.Module):
             -1,
         )
         
+        if targets is None:
+            return output, 0
+        else:
+            iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, tconf = build_targets(
+                pred_boxes=pred_boxes,
+                pred_cls=pred_cls,
+                targets=targets,
+                anchors=self.scaled_anchors,
+                ignore_thres=self.ignore_thres
+            )
+        
         return output
 
 class Darknet(nn.Module):
@@ -161,8 +175,9 @@ class Darknet(nn.Module):
     
     def forward(self, x, targets=None):
         img_dim = x.shape[2]
+        loss = 0
         layer_outputs, yolo_outputs = [], []
-        for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
+        for i, (module_def, module) in enumerate(zip(self.module_defs[1:], self.module_list)):
             if module_def['type'] in ['convolutional', 'maxpool', 'upsample']:
                 x = module(x)
             elif module_def['type'] == 'route':
@@ -172,10 +187,12 @@ class Darknet(nn.Module):
                 layer_i = int(module_def['from'])
                 x = layer_outputs[-1] + layer_outputs[layer_i]
             elif module_def['type'] == 'yolo':
-                x = module[0](x, targets, img_dim)
+                x, layer_loss = module[0](x, targets, img_dim)
+                loss += layer_loss
                 yolo_outputs.append(x)
             layer_outputs.append(x)
-        return yolo_outputs
+            yolo_outputs = to_cpu(torch.cat(yolo_outputs, 1))
+        return yolo_outputs if targets is None else (loss, yolo_outputs)
 # Test modules
 # print(create_modules(parse_cfg(yolov3_config))[1])
 
