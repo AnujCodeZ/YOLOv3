@@ -16,7 +16,7 @@ def get_test_img():
     img = Variable(img)
     return img
 
-model = Darknet('config/yolov3-tiny.cfg')
+model = Darknet('config/yolov3.cfg')
 img = get_test_img()
 out = model(img)
 print(out)
