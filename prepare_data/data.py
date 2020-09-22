@@ -25,10 +25,10 @@ categories = list(set(categories))
 # create dataset
 def create_dataset(clothing, dataset_type):
     # making directories
-    images_path = Path(f'data/images/{dataset_type}')
+    images_path = Path(f'../data/images/{dataset_type}')
     images_path.mkdir(parents=True, exist_ok=True)
     
-    labels_path = Path(f'data/labels/{dataset_type}')
+    labels_path = Path(f'../data/labels/{dataset_type}')
     labels_path.mkdir(parents=True, exist_ok=True)
     
     for img_id, row in enumerate(tqdm(clothing)):

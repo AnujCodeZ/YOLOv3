@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from utils import *
+from utils.utils import *
 
 
 yolov3_config = './config/yolov3-tiny.cfg'
